@@ -8,6 +8,7 @@ FROM litestream/litestream:0.5.17@sha256:4b02b9859a6b6b4087d8b8944e15f7e984bd795
 FROM scratch AS kit
 COPY --from=litestream /usr/local/bin/litestream /usr/local/bin/litestream
 COPY container/LICENSE.litestream /usr/share/licenses/litestream/LICENSE
+COPY LICENSE /usr/share/licenses/litestreamkit/LICENSE
 COPY container/litestream/ /etc/litestream/
 COPY --chmod=755 container/litestream-entrypoint.sh /usr/local/bin/litestream-entrypoint
 

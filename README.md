@@ -18,6 +18,7 @@ Litestream は v0.5.17（Apache-2.0）をイメージダイジェスト固定で
 | `container/litestream/file.yml` | `file` 用の Litestream 設定（`/etc/litestream/file.yml`） |
 | `container/litestream/s3.yml` | `s3` 用の Litestream 設定（`/etc/litestream/s3.yml`） |
 | `container/LICENSE.litestream` | Litestream のライセンス |
+| `LICENSE` | このキットのライセンス（MIT） |
 | `Dockerfile` | 公開するキット（`kit` ステージ）と、それを使う組み込み例。例では `example/demo-app.sh`（SQLite に記録し続けるだけのアプリ）を動かす |
 | `test/` | エントリーポイントの単体テストとコンテナー結合テスト |
 | `.github/workflows/ci.yml` | ShellCheck とテストの実行、およびバージョンタグでのキット公開を行う GitHub Actions のワークフロー |
@@ -37,14 +38,14 @@ ENV LITESTREAM_EXEC="dotnet /app/MyApp.dll"
 ENTRYPOINT ["/usr/local/bin/litestream-entrypoint"]
 ```
 
-キットは `linux/amd64` と `linux/arm64` に対応し、中身は Litestream 本体、エントリーポイント、Litestream の設定とライセンスだけである。タグは次のように使い分ける。
+キットは `linux/amd64` と `linux/arm64` に対応し、中身は Litestream 本体、エントリーポイント、Litestream の設定、Litestream とこのキットのライセンス（`/usr/share/licenses/` 以下）だけである。タグは次のように使い分ける。
 
 | タグ | 用途 |
 | --- | --- |
 | `1` | ビルドのたびに `1.x.y` の最新版を使う。キットを更新してもアプリ側の Dockerfile を変更しなくてよい |
 | `1.2.3` | 特定のバージョンに固定する。更新時は Dockerfile のタグを変更する |
 
-パッケージが非公開の場合は、アプリのビルド環境でも `docker login ghcr.io` が必要になる（[キットの公開](#キットの公開)）。GHCR を使わない場合は、`container/` をアプリのリポジトリにコピーし、`Dockerfile` の `litestream` と `kit` の2つのステージを加えて `COPY --from=kit / /` とする。
+パッケージが非公開の場合は、アプリのビルド環境でも `docker login ghcr.io` が必要になる（[キットの公開](#キットの公開)）。GHCR を使わない場合は、`container/` と `LICENSE` をアプリのリポジトリにコピーし、`Dockerfile` の `litestream` と `kit` の2つのステージを加えて `COPY --from=kit / /` とする。
 
 - アプリ自身の DB 設定（接続文字列など）を `LITESTREAM_DB_PATH` と同じ絶対パスに向ける。エントリーポイントはアプリの設定を書き換えない。
 - アプリは SQLite を WAL モードで使う。
