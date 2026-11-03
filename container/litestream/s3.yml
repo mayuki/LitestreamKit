@@ -1,0 +1,23 @@
+# Replicates to AWS S3 or an S3-compatible service (LITESTREAM_REPLICA_TYPE=s3).
+# litestream-entrypoint sets the environment variables referenced here.
+# Credentials are not written here: Litestream reads LITESTREAM_ACCESS_KEY_ID and
+# LITESTREAM_SECRET_ACCESS_KEY (or the AWS SDK's own sources) directly.
+snapshot:
+  interval: ${LITESTREAM_SNAPSHOT_INTERVAL}
+  retention: ${LITESTREAM_SNAPSHOT_RETENTION}
+
+shutdown-sync-timeout: 30s
+
+dbs:
+  - path: "${LITESTREAM_DB_PATH}"
+    replica:
+      type: s3
+      bucket: "${LITESTREAM_S3_BUCKET}"
+      path: "${LITESTREAM_S3_PATH}"
+      # Empty values fall back to Litestream's defaults: AWS S3 endpoint, detected
+      # region (us-east-1 with a custom endpoint), and path style for custom endpoints.
+      endpoint: "${LITESTREAM_S3_ENDPOINT}"
+      region: "${LITESTREAM_S3_REGION}"
+      force-path-style: ${LITESTREAM_S3_FORCE_PATH_STYLE}
+      skip-verify: ${LITESTREAM_S3_SKIP_VERIFY}
+      sync-interval: ${LITESTREAM_SYNC_INTERVAL}

@@ -1,0 +1,14 @@
+# Replicates to a directory mounted at /backup (LITESTREAM_REPLICA_TYPE=file).
+# litestream-entrypoint sets the environment variables referenced here.
+snapshot:
+  interval: ${LITESTREAM_SNAPSHOT_INTERVAL}
+  retention: ${LITESTREAM_SNAPSHOT_RETENTION}
+
+shutdown-sync-timeout: 30s
+
+dbs:
+  - path: "${LITESTREAM_DB_PATH}"
+    replica:
+      type: file
+      path: /backup
+      sync-interval: ${LITESTREAM_SYNC_INTERVAL}
