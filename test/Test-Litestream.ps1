@@ -167,18 +167,21 @@ try {
     Assert-StartupFailure 'file: a read-only backup destination' @('--mount',
         "type=volume,source=$emptyVolume,target=/backup,readonly") '/backup must be writable'
     Assert-StartupFailure 'file: a missing backup with real Litestream' @('--mount',
-        "type=volume,source=$emptyVolume,target=/backup") 'Restore failed'
+        "type=volume,source=$emptyVolume,target=/backup") 'No backup exists'
     Assert-StartupFailure 's3: missing bucket setting' @('-e', 'LITESTREAM_REPLICA_TYPE=s3',
         '-e', 'LITESTREAM_S3_PATH=missing/app') 'Set LITESTREAM_S3_BUCKET'
     Assert-StartupFailure 's3: a missing backup with real Litestream' ($s3Arguments +
-        @('-e', 'LITESTREAM_S3_PATH=missing/app')) 'Restore failed'
+        @('-e', 'LITESTREAM_S3_PATH=missing/app')) 'No backup exists'
     Assert-StartupFailure 's3: wrong credentials are not treated as a missing backup' (@('--network', $network,
         '-e', "LITESTREAM_ACCESS_KEY_ID=$accessKey", '-e', 'LITESTREAM_SECRET_ACCESS_KEY=wrong-secret-key',
         '-e', 'LITESTREAM_REPLICA_TYPE=s3', '-e', "LITESTREAM_S3_BUCKET=$bucket", '-e', "LITESTREAM_S3_ENDPOINT=$s3Endpoint",
-        '-e', 'LITESTREAM_S3_PATH=missing/app', '-e', 'LITESTREAM_ALLOW_INITIALIZE=true')) 'Restore failed'
+        '-e', 'LITESTREAM_S3_PATH=missing/app', '-e', 'LITESTREAM_ALLOW_INITIALIZE=true')) 'rejected the credentials'
     Assert-StartupFailure 's3: a nonexistent bucket is not treated as a missing backup' ($s3Credentials + @(
         '-e', 'LITESTREAM_REPLICA_TYPE=s3', '-e', 'LITESTREAM_S3_BUCKET=no-such-bucket', '-e', "LITESTREAM_S3_ENDPOINT=$s3Endpoint",
-        '-e', 'LITESTREAM_S3_PATH=missing/app', '-e', 'LITESTREAM_ALLOW_INITIALIZE=true')) 'Restore failed'
+        '-e', 'LITESTREAM_S3_PATH=missing/app', '-e', 'LITESTREAM_ALLOW_INITIALIZE=true')) 'bucket was not found'
+    Assert-StartupFailure 's3: an unresolvable endpoint is not treated as a missing backup' ($s3Credentials + @(
+        '-e', 'LITESTREAM_REPLICA_TYPE=s3', '-e', "LITESTREAM_S3_BUCKET=$bucket", '-e', 'LITESTREAM_S3_ENDPOINT=http://no-such-host.invalid:7070',
+        '-e', 'LITESTREAM_S3_PATH=missing/app', '-e', 'LITESTREAM_ALLOW_INITIALIZE=true')) 'could not be reached'
 
     # A plain run without any backup destination, as in development or CI.
     $direct = "$prefix-none"

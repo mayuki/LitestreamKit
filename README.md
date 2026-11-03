@@ -66,6 +66,7 @@ ENTRYPOINT ["/usr/local/bin/litestream-entrypoint"]
 | `LITESTREAM_SNAPSHOT_INTERVAL` | `24h` | フルスナップショットの間隔 |
 | `LITESTREAM_SNAPSHOT_RETENTION` | `168h` | 保持期間（7日） |
 | `LITESTREAM_CONFIG_PATH` | `/etc/litestream/<type>.yml` | 独自の Litestream 設定を使う場合に指定する |
+| `LOG_LEVEL` | `INFO` | Litestream のログレベル。`debug` で S3 リクエストを1件ずつ記録する（[調査の方法](#起動しないときの調査)） |
 
 ### `s3` 用
 
@@ -147,7 +148,7 @@ Litestream を使わず、`LITESTREAM_EXEC` のアプリをそのまま起動す
 
 ## 起動時の動作
 
-1. 環境変数を検証する。`file` では `/backup` がマウントされ書き込めることを確認する。
+1. 環境変数を検証し、DB のパスとバックアップ先をログに出す。`file` では `/backup` がマウントされ書き込めることを確認する。
 2. 非空のローカル DB があればそれを使う（`docker restart` など）。空ファイルや、DB のない孤立した `-wal` などはエラーにする。
 3. DB がなければバックアップ先から復元し、SQLite の `quick_check` を行う。
 4. バックアップがなく初期 DB ファイルがあれば取り込む（後述）。
@@ -157,6 +158,28 @@ Litestream を使わず、`LITESTREAM_EXEC` のアプリをそのまま起動す
 `LITESTREAM_REPLICA_TYPE=none` の場合は、共通の環境変数（`LITESTREAM_DB_PATH`・`LITESTREAM_EXEC` など）だけを検証し、`/backup` の確認や復元を行わずにアプリを直接起動する。
 
 バックアップも初期 DB もない場合、既定では起動しない。`LITESTREAM_ALLOW_INITIALIZE=true` でも、許すのは「バックアップが1つもない」場合だけで、認証エラー・バケット不在・通信エラー・破損したバックアップでは起動しない。設定ミスで空の DB から始まり、既存のバックアップを上書きすることを防ぐ。
+
+## 起動しないときの調査
+
+起動時に、DB のパスとバックアップ先をログに出す。認証情報は値を出さず、どの環境変数から読むかだけを出す。独自の Litestream 設定を使う場合は、設定ファイルのパスを出す。
+
+```text
+Database startup: database /data/app.db, backing up to s3://my-backups/myapp/db (endpoint: https://<ACCOUNT_ID>.r2.cloudflarestorage.com, region: auto, credentials: LITESTREAM_ACCESS_KEY_ID).
+```
+
+復元に失敗すると、Litestream のエラーのあとに、バックアップ先と確認すべき点をログに出す。
+
+| Litestream のエラーに含まれる文字列 | 状況 | 確認すること |
+| --- | --- | --- |
+| `no matching backup files` | バックアップ先には接続できたが、バックアップがない | バックアップ先が正しいか。バックアップのない初回デプロイだけ `LITESTREAM_ALLOW_INITIALIZE=true` を指定する |
+| `get credentials` | 認証情報が見つからない | `LITESTREAM_ACCESS_KEY_ID` と `LITESTREAM_SECRET_ACCESS_KEY`、または IAM ロール |
+| `x509`・`certificate`・`HTTP response to HTTPS client` | TLS の接続に失敗した | エンドポイントの `http`/`https`、イメージの CA 証明書 |
+| `request send failed`・`no such host`・`connection refused`・`i/o timeout` | バックアップ先に接続できない | エンドポイントのホストとポート、DNS、コンテナーのネットワーク |
+| `SignatureDoesNotMatch`・`InvalidAccessKeyId`・`AccessDenied`・`StatusCode: 403` | 認証情報が拒否された | アクセスキー、シークレットキー、バケットに対する権限 |
+| `NoSuchBucket`・`StatusCode: 404` | バケットがない | バケット名、エンドポイント |
+| `AuthorizationHeaderMalformed`・`PermanentRedirect`・`StatusCode: 301` | バケットが別のリージョンにある | `LITESTREAM_S3_REGION` |
+
+エンドポイントに接続できない場合、Litestream はログを出さずに1回の操作につき最大10回リトライする。接続を拒否される環境で試すと、エラーになるまで約4分かかった。その間は 30 秒ごとに `still waiting for the replica after 30s` のようにログに出す。大きな DB の復元でも同じログが出るので、`-e LOG_LEVEL=debug` を付けて区別する。Litestream が S3 リクエストの URL を1件ずつログに出すため、同じ URL へのリトライが続いているかどうかが分かる。アプリの起動後も詳細なログが出続けるので、調査が終わったら外す。
 
 ## 既存の DB を引き継ぐ
 

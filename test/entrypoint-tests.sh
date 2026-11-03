@@ -47,7 +47,12 @@ case "$command" in
         case "$FAKE_RESTORE" in
             success) printf 'restored database' > "$output" ;;
             absent) [ "$optional" = true ] || exit 1 ;;
-            failure) printf 'partial database' > "$output"; exit 1 ;;
+            failure)
+                printf 'partial database' > "$output"
+                echo "Error: ${FAKE_RESTORE_ERROR:-fake restore failure}" >&2
+                exit 1
+                ;;
+            slow) /bin/sleep 1; printf 'restored database' > "$output" ;;
             empty) : > "$output" ;;
             *) exit 2 ;;
         esac
@@ -106,6 +111,7 @@ reset_case() {
     unset LITESTREAM_SYNC_INTERVAL LITESTREAM_SNAPSHOT_INTERVAL LITESTREAM_SNAPSHOT_RETENTION
     unset LITESTREAM_S3_BUCKET LITESTREAM_S3_PATH LITESTREAM_S3_ENDPOINT LITESTREAM_S3_REGION
     unset LITESTREAM_S3_FORCE_PATH_STYLE LITESTREAM_S3_SKIP_VERIFY
+    unset LITESTREAM_ACCESS_KEY_ID LITESTREAM_SECRET_ACCESS_KEY AWS_ACCESS_KEY_ID FAKE_RESTORE_ERROR
     export Storage__BasePath=/app/.storage
     export APP_DATABASE_CONNECTION='application-specific setting'
     export LITESTREAM_DB_PATH=/data/sample.db
@@ -158,6 +164,25 @@ expect_no_call() {
         echo "FAIL: unexpected Litestream call: $1" >&2
         exit 1
     fi
+}
+
+expect_no_output() {
+    if grep -qF -- "$1" /tmp/entrypoint-output; then
+        cat /tmp/entrypoint-output
+        echo "FAIL: unexpected output: $1" >&2
+        exit 1
+    fi
+}
+
+# The error stays visible, with the location and what to check.
+expect_restore_hint() {
+    reset_case
+    use_s3
+    export FAKE_RESTORE=failure FAKE_RESTORE_ERROR="$1"
+    run_case "restore error is explained: $2" failure
+    expect_output "$1"
+    expect_output 'Restore failed from s3://backups/sample/db'
+    expect_output "$2"
 }
 
 reset_case
@@ -287,9 +312,67 @@ grep -q -- '^restore -config /etc/litestream/s3.yml ' /tmp/entrypoint-trace
 grep -qx 'config=/etc/litestream/s3.yml' /tmp/app-started
 
 reset_case
+run_case 'the file destination is logged' success
+expect_output 'database /data/sample.db, backing up to the file replica at /backup.'
+
+reset_case
+use_s3
+export LITESTREAM_S3_REGION=auto
+export LITESTREAM_ACCESS_KEY_ID=visible-key-id LITESTREAM_SECRET_ACCESS_KEY=visible-secret-key
+printf 'existing database' > /data/sample.db
+run_case 'the s3 destination is logged without credential values, also without a restore' success
+expect_output 's3://backups/sample/db (endpoint: https://s3.example.test, region: auto, credentials: LITESTREAM_ACCESS_KEY_ID)'
+expect_no_output visible-key-id
+expect_no_output visible-secret-key
+
+reset_case
+use_s3
+unset LITESTREAM_S3_ENDPOINT
+export LITESTREAM_ACCESS_KEY_ID=ignored AWS_ACCESS_KEY_ID=preferred
+run_case 'the logged credential source follows the precedence of Litestream' success
+expect_output '(endpoint: AWS S3, region: default, credentials: AWS_ACCESS_KEY_ID)'
+unset AWS_ACCESS_KEY_ID LITESTREAM_ACCESS_KEY_ID
+reset_case
+use_s3
+run_case 'credentials from the AWS SDK defaults are logged as such' success
+expect_output 'credentials: AWS SDK defaults'
+
+reset_case
+export LITESTREAM_REPLICA_TYPE=s3 LITESTREAM_CONFIG_PATH=/tmp/custom-litestream.yml
+run_case 'a custom configuration is logged as the destination' success
+expect_output 'the s3 replica defined in /tmp/custom-litestream.yml'
+
+reset_case
 use_s3
 export FAKE_RESTORE=absent
 run_case 's3 replica without a backup fails closed by default' failure
+
+expect_restore_hint 'no matching backup files available' 'No backup exists at this location'
+expect_restore_hint 'get identity: get credentials: failed to refresh cached credentials' 'No credentials were found'
+expect_restore_hint 'get credentials: request send failed, Get "http://169.254.169.254/": dial tcp: i/o timeout' 'No credentials were found'
+expect_restore_hint 'request send failed: tls: failed to verify certificate: x509: certificate signed by unknown authority' 'TLS failed'
+expect_restore_hint 'request send failed: http: server gave HTTP response to HTTPS client' 'TLS failed'
+expect_restore_hint 'request send failed, Get "http://host/": dial tcp: lookup host: no such host' 'could not be reached'
+expect_restore_hint 'exceeded maximum number of attempts, 10, request send failed: connect: connection refused' 'could not be reached'
+expect_restore_hint 'StatusCode: 403, api error SignatureDoesNotMatch: signature mismatch' 'rejected the credentials'
+expect_restore_hint 'StatusCode: 403, api error InvalidAccessKeyId: unknown key' 'rejected the credentials'
+expect_restore_hint 'StatusCode: 403, api error AccessDenied: denied' 'rejected the credentials'
+expect_restore_hint 'StatusCode: 404, NoSuchBucket: The specified bucket does not exist.' 'The bucket was not found'
+expect_restore_hint 'StatusCode: 301, api error PermanentRedirect: wrong endpoint' 'another region'
+expect_restore_hint 'an error the entrypoint does not know' 'Check the Litestream error above'
+
+# With a short fake sleep, the 30 second interval passes during a 1 second restore.
+reset_case
+export FAKE_RESTORE=slow
+printf '#!/bin/sh\nexec /bin/sleep 0.1\n' > /tmp/fake-bin/sleep
+chmod +x /tmp/fake-bin/sleep
+run_case 'a slow restore reports what it is waiting for' success
+rm /tmp/fake-bin/sleep
+expect_output 'still waiting for the replica after 30s: the file replica at /backup'
+# Anything still running would keep appending to the output.
+reported=$(wc -c < /tmp/entrypoint-output)
+/bin/sleep 0.5
+[ "$(wc -c < /tmp/entrypoint-output)" = "$reported" ]
 
 for name in LITESTREAM_S3_BUCKET LITESTREAM_S3_PATH; do
     reset_case

@@ -53,6 +53,65 @@ validate_bundled_s3_settings() {
     [ -z "${LITESTREAM_S3_SKIP_VERIFY:-}" ] || require_boolean LITESTREAM_S3_SKIP_VERIFY "$LITESTREAM_S3_SKIP_VERIFY"
 }
 
+# Where backups go, for the startup log and restore errors. This names the source
+# of the credentials and must never include their values.
+describe_replica() {
+    if [ -n "${LITESTREAM_CONFIG_PATH:-}" ]; then
+        echo "the $replica_type replica defined in $config_path"
+    elif [ "$replica_type" = file ]; then
+        echo "the file replica at /backup"
+    else
+        # Litestream ignores LITESTREAM_* when AWS_* is set, even if it is empty.
+        if [ -n "${AWS_ACCESS_KEY_ID+set}" ]; then
+            credentials=AWS_ACCESS_KEY_ID
+        elif [ -n "${LITESTREAM_ACCESS_KEY_ID+set}" ]; then
+            credentials=LITESTREAM_ACCESS_KEY_ID
+        else
+            credentials='AWS SDK defaults'
+        fi
+        echo "s3://$LITESTREAM_S3_BUCKET/$LITESTREAM_S3_PATH (endpoint: ${LITESTREAM_S3_ENDPOINT:-AWS S3}, region: ${LITESTREAM_S3_REGION:-default}, credentials: $credentials)"
+    fi
+}
+
+# Litestream retries an unreachable replica for minutes without logging anything,
+# and a large restore is just as quiet, so report what a long wait is waiting for.
+# Runs in the background; stops on TERM without leaving its sleep behind.
+report_slow_restore() {
+    waited=0
+    while :; do
+        sleep 30 &
+        sleep_pid=$!
+        trap 'kill "$sleep_pid"; exit' TERM
+        wait "$sleep_pid"
+        waited=$((waited + 30))
+        log "still waiting for the replica after ${waited}s: $replica. A large database takes time, but Litestream also retries an unreachable replica for several minutes without logging. Set LOG_LEVEL=debug to log each request." >&2
+    done
+}
+
+# What to check for a Litestream restore error. These match the error text of the
+# pinned Litestream version; the tests catch a changed message, and anything
+# unrecognized gets only the general advice.
+restore_hint() {
+    case "$1" in
+        *'no matching backup files'*)
+            echo "No backup exists at this location. Check that it is the right one. Only a first deployment without backups should set LITESTREAM_ALLOW_INITIALIZE=true." ;;
+        *'get credentials'*)
+            echo "No credentials were found. Set LITESTREAM_ACCESS_KEY_ID and LITESTREAM_SECRET_ACCESS_KEY, or give the container an IAM role." ;;
+        *x509* | *certificate* | *'HTTP response to HTTPS client'*)
+            echo "TLS failed. Check http or https in the endpoint, and that the image has CA certificates (ca-certificates on Debian)." ;;
+        *'request send failed'* | *'no such host'* | *'connection refused'* | *'i/o timeout'*)
+            echo "The replica could not be reached. Check the endpoint's host and port, DNS, and the container's network." ;;
+        *SignatureDoesNotMatch* | *InvalidAccessKeyId* | *AccessDenied* | *'StatusCode: 403'*)
+            echo "The replica rejected the credentials. Check the access key, the secret key, and the key's permissions on the bucket." ;;
+        *NoSuchBucket* | *'StatusCode: 404'*)
+            echo "The bucket was not found. Check the bucket name and the endpoint." ;;
+        *AuthorizationHeaderMalformed* | *PermanentRedirect* | *'StatusCode: 301'*)
+            echo "The bucket is in another region. Check the region." ;;
+        *)
+            echo "Check the Litestream error above." ;;
+    esac
+}
+
 # Imports a standalone SQLite file into restored_db. It works only on a local
 # copy and backs it up to the replica before consuming the source, so any failure
 # leaves the source untouched and the application stopped.
@@ -117,6 +176,9 @@ if [ -z "${LITESTREAM_CONFIG_PATH:-}" ] && [ "$replica_type" = s3 ]; then
 fi
 [ -f "$config_path" ] && [ -r "$config_path" ] || fail "The Litestream configuration is not a readable file: $config_path"
 
+replica=$(describe_replica)
+log "database $db_path, backing up to $replica."
+
 db_dir=${db_path%/*}
 # A database directly under / leaves db_dir empty.
 [ -n "$db_dir" ] || db_dir=/
@@ -149,7 +211,12 @@ else
     # a failed or interrupted restore never leaves a partial file at db_path.
     restore_dir=$(mktemp -d "$db_dir/.restore.XXXXXX")
     restored_db=$restore_dir/restored.db
+    report_slow_restore &
+    slow_restore_reporter=$!
     cleanup() {
+        kill "$slow_restore_reporter" 2>/dev/null || :
+        # Reap it here: the process that replaces this shell would not.
+        wait "$slow_restore_reporter" 2>/dev/null || :
         # Guard rm -rf against anything but the directory created above.
         case "$restore_dir" in
             "$db_dir"/.restore.*) rm -rf -- "$restore_dir" ;;
@@ -170,9 +237,18 @@ else
     fi
 
     log "restoring the database from the $replica_type replica."
+    # Litestream's own log goes to stdout and stays live. Its stderr carries the
+    # final error, which is captured to choose a hint.
+    restore_errors=$restore_dir/errors
+    restore_succeeded=true
     # shellcheck disable=SC2086
-    litestream restore -config "$config_path" -o "$restored_db" -integrity-check quick $if_replica_exists "$db_path" \
-        || fail "Restore failed. The application was not started. Only a first deployment without backups should use LITESTREAM_ALLOW_INITIALIZE=true."
+    litestream restore -config "$config_path" -o "$restored_db" -integrity-check quick $if_replica_exists "$db_path" 2> "$restore_errors" \
+        || restore_succeeded=false
+    cat "$restore_errors" >&2
+    if [ "$restore_succeeded" = false ]; then
+        log "Restore failed from $replica. The application was not started." >&2
+        fail "$(restore_hint "$(cat "$restore_errors")") Set LOG_LEVEL=debug for more detail from Litestream."
+    fi
 
     if [ ! -e "$restored_db" ] && [ -e "$initial_db_path" ]; then
         import_initial_db
